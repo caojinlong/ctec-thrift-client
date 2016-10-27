@@ -32,7 +32,7 @@
                                socket_timeout = 30)
 
 - 方式2：
--client_pool_sequence_with_zookeeper = ClientPool(zk_hosts="172.16.50.146:8581",
+- client_pool_sequence_with_zookeeper = ClientPool(zk_hosts="172.16.50.146:8581",
                                                  zk_path="/thrift",
                                                  service=sequence_thrift.Sequence,
                                                  max_renew_times=3,
