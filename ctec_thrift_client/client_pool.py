@@ -4,7 +4,7 @@ import threading
 from collections import deque
 import logging
 import socket
-
+import time
 from kazoo.client import KazooClient
 from thriftpy.protocol import TBinaryProtocolFactory
 from thriftpy.transport import (
@@ -21,7 +21,7 @@ from thriftpy.transport import TTransportException
 
 class ClientPool:
     def __init__(self, service, server_hosts=None, zk_path=None, zk_hosts=None, max_renew_times=3, maxActive=20,
-                 maxIdle=10, get_connection_timeout=30, socket_timeout=30):
+                 maxIdle=10, get_connection_timeout=30, socket_timeout=30, disable_time=2):
         """
         :param service: Thrift的Service名称
         :param server_hosts: 服务提供者地址，数组类型，['ip:port','ip:port']
@@ -32,6 +32,7 @@ class ClientPool:
         :param maxIdle: 最大空闲连接数
         :param get_connection_timeout:获取连接的超时时间
         :param socket_timeout: 读取数据的超时时间
+        :param disable_time: 连接失效时间
         """
         # 负载均衡队列
         self.load_balance_queue = deque()
@@ -45,6 +46,7 @@ class ClientPool:
         self.get_connection_timeout = get_connection_timeout
         self.no_client_queue = deque()
         self.socket_timeout = socket_timeout
+        self.disable_time = disable_time
 
         if zk_hosts:
             self.kazoo_client = KazooClient(hosts=zk_hosts)
@@ -115,7 +117,6 @@ class ClientPool:
         :param children:
         :return:
         """
-        print children
         with self.lock:
             # 清空负载均衡队列
             self.load_balance_queue.clear()
@@ -154,8 +155,10 @@ class ClientPool:
             if client is not None:
 
                 for i in xrange(self.max_renew_times):
+
                     try:
                         put_back_flag = True
+                        client.last_use_time = time.time()
                         fun = getattr(client, name, None)
                         return fun(*args, **kwds)
                     except socket.timeout:
@@ -169,28 +172,36 @@ class ClientPool:
                         put_back_flag = False
 
                         if e.type == TTransportException.END_OF_FILE:
-                            logging.warning("Socket Connection Reset Error!")
+                            logging.warning("Socket Connection Reset Error,%s", e)
                             with self.lock:
                                 client.close()
                                 self.pool_size -= 1
                                 client = self.get_new_client()
                         else:
-                            logging.error("Socket Error!")
+                            logging.error("Socket Error,%s", e)
                             self.close_one_client(client)
                             break
 
                     except socket.error, e:
                         put_back_flag = False
                         if e.errno == socket.errno.ECONNABORTED:
-                            logging.warning("Socket Connection aborted Error!")
+                            logging.warning("Socket Connection aborted Error,%s", e)
                             with self.lock:
                                 client.close()
                                 self.pool_size -= 1
                                 client = self.get_new_client()
                         else:
-                            logging.error("Socket Error!")
+                            logging.error("Socket Error, %s", e)
                             self.close_one_client(client)
                             break
+
+                    except Exception as e:
+                        put_back_flag = False
+
+                        logging.error("Thrift Error, %s", e)
+                        self.close_one_client(client)
+                        break
+
                     finally:
                         # 将连接放回连接池
                         if put_back_flag is True:
@@ -237,10 +248,13 @@ class ClientPool:
         新建一个连接，若一直无法获取连接，则返回None
         :return:
         """
-
         client = self.get_one_client_from_pool()
-        if client is not None:
+
+        if client is not None and (time.time() - client.last_use_time) < self.disable_time:
             return client
+        else:
+            if client is not None:
+                self.close_one_client(client)
 
         client = self.get_new_client()
         if client is not None:
