@@ -1,6 +1,6 @@
 import setuptools
 
-version = '1.1.2'
+version = '1.1.3'
 
 setuptools.setup(
         name='ctec_thrift_client',

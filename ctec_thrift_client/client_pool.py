@@ -20,8 +20,8 @@ from thriftpy.transport import TTransportException
 
 
 class ClientPool:
-    def __init__(self, service, server_hosts=None, zk_path=None, zk_hosts=None, max_renew_times=3, maxActive=20,
-                 maxIdle=10, get_connection_timeout=30, socket_timeout=30, disable_time=2):
+    def __init__(self, service, server_hosts=None, zk_path=None, zk_hosts=None, logger=None, max_renew_times=3, maxActive=20,
+                 maxIdle=10, get_connection_timeout=30, socket_timeout=30, disable_time=3):
         """
         :param service: Thrift的Service名称
         :param server_hosts: 服务提供者地址，数组类型，['ip:port','ip:port']
@@ -47,6 +47,7 @@ class ClientPool:
         self.no_client_queue = deque()
         self.socket_timeout = socket_timeout
         self.disable_time = disable_time
+        self.logger = logging if logger is None else logger
 
         if zk_hosts:
             self.kazoo_client = KazooClient(hosts=zk_hosts)
@@ -147,8 +148,10 @@ class ClientPool:
                     self.no_client_queue.appendleft(async_result)
                     client = async_result.get()  # blocking
                 except:
-                    self.no_client_queue.remove(async_result)
-                    logging.error("Get Connection Timeout!")
+                    with self.lock:
+                        if client is None:
+                            self.no_client_queue.remove(async_result)
+                            self.logger.error("Get Connection Timeout!")
                 finally:
                     time_out.cancel()
 
@@ -162,7 +165,7 @@ class ClientPool:
                         fun = getattr(client, name, None)
                         return fun(*args, **kwds)
                     except socket.timeout:
-                        logging.error("Socket Timeout!")
+                        self.logger.error("Socket Timeout!")
                         # 关闭连接，不关闭会导致乱序
                         put_back_flag = False
                         self.close_one_client(client)
@@ -172,33 +175,33 @@ class ClientPool:
                         put_back_flag = False
 
                         if e.type == TTransportException.END_OF_FILE:
-                            logging.warning("Socket Connection Reset Error,%s", e)
+                            self.logger.warning("Socket Connection Reset Error,%s", e)
                             with self.lock:
                                 client.close()
                                 self.pool_size -= 1
                                 client = self.get_new_client()
                         else:
-                            logging.error("Socket Error,%s", e)
+                            self.logger.error("Socket Error,%s", e)
                             self.close_one_client(client)
                             break
 
                     except socket.error, e:
                         put_back_flag = False
                         if e.errno == socket.errno.ECONNABORTED:
-                            logging.warning("Socket Connection aborted Error,%s", e)
+                            self.logger.warning("Socket Connection aborted Error,%s", e)
                             with self.lock:
                                 client.close()
                                 self.pool_size -= 1
                                 client = self.get_new_client()
                         else:
-                            logging.error("Socket Error, %s", e)
+                            self.logger.error("Socket Error, %s", e)
                             self.close_one_client(client)
                             break
 
                     except Exception as e:
                         put_back_flag = False
 
-                        logging.error("Thrift Error, %s", e)
+                        self.logger.error("Thrift Error, %s", e)
                         self.close_one_client(client)
                         break
 
